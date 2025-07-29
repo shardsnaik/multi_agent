@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pillow
+transformers
+torch
+python-multipart
+redis
+sqlalchemy
+pydantic
+openai
+anthropic
