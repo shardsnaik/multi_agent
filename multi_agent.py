@@ -1,166 +1,183 @@
 from transformers import pipeline
 from openai import OpenAI
-import base64, os
+import base64
 from dotenv import load_dotenv
-os.environ['TF_ENABLE_ONEDNN_OPTS'] ='0'
+import json
+from langgraph.graph import StateGraph, END
+from langchain_openai import ChatOpenAI
+from utils import AgentState, get_conversation_context, image_to_base64, add_to_memory
 load_dotenv()
+from Agents.coder_agent import coder_agent
+from Agents.search_agent import search_agent
+from Agents.text_agent import text_agent
+from Agents.image_agent import image_agent
+from Agents.router import *
+# Global variables
 client = OpenAI()
+conversation_history = []
+MODEL = "gpt-4o"
+MAX_TOKENS = 500
 
-class Multiagent:
-        def image_to_base64(self, image_path:str)-> str:
-            '''
-            Function to decode the image
-                Args: 
-                    image_path (str): Path to the image file
-                Returns:
-                    str: Base64 encoded image
-            '''
-            with open(image_path, 'rb') as img:
-                image_bytes = img.read()
-                decoded_imge = base64.b64encode(image_bytes).decode('utf-8')
-                # return base64.b64encode(img.read()).decode('utf-8')
-                return decoded_imge
+# Define the state
 
-        def run_agent(self, image_src: str = None, text_input: str= None)-> str:
-            '''
-            Input: 
-            The fucntion that takes image and text as input 
-            Return:
-                Model Generated Text
-            '''
-            content = []
-            if not text_input and not image_src:
-                 return 'Please proivde either text input or image input'
-            if text_input:
-                content.append({'type':'text', 'text': text_input})
-            if image_src:
-                try:
-                     decoded_image = self.image_to_base64(image_path=image_src)
-                     content.append({
-                    'type': 'image_url',
-                    'image_url':{
-                        "url": f"data:image/jpeg;base64,{decoded_image}"
+
+# FINAL PROCESSOR
+def final_processor(state: AgentState) -> AgentState:
+    """Process final response and update memory"""
+    # Add to conversation memory
+    add_to_memory("user", state["user_input"])
+    add_to_memory("assistant", state["response"])
+    
+    # Add agent info to response
+    agent_name = state["agent_choice"].upper()
+    state["response"] += f"\n\n[Processed by: {agent_name} AGENT]"
+    
+    return state
+
+# CREATE WORKFLOW
+def create_workflow():
+    """Create the LangGraph workflow"""
+    workflow = StateGraph(AgentState)
+    
+    # Add nodes
+    workflow.add_node("router", router_agent)
+    workflow.add_node("text", text_agent)
+    workflow.add_node("coder", coder_agent)
+    workflow.add_node("search", search_agent)
+    workflow.add_node('image', image_agent)
+    workflow.add_node("final", final_processor)
+    
+    # Set entry point
+    workflow.set_entry_point("router")
+    
+    # Add conditional edges from router
+    workflow.add_conditional_edges(
+        "router",
+        route_to_agent,
+        {
+            "text": "text",
+            "coder": "coder", 
+            "search": "search",
+            "image": "image"
+        }
+    )
+    
+    # All agents go to final processor
+    workflow.add_edge("text", "final")
+    workflow.add_edge("coder", "final")
+    workflow.add_edge("search", "final")
+    workflow.add_edge("image", "final")
+    
+    # Final processor ends workflow
+    workflow.add_edge("final", END)
+    
+    return workflow.compile()
+
+# Initialize the workflow
+app = create_workflow()
+
+# MAIN FUNCTIONS
+def run_agent(text_input: str = None, image_src: str = None) -> str:
+    """Main function to run the multi-agent system"""
+    if not text_input:
+        return "Please provide text input."
+    
+    # Create initial state
+    initial_state = {
+        "user_input": text_input,
+        "image_path": image_src,
+        "agent_choice": "",
+        "response": "",
+        "messages": []
+    }
+    
+    try:
+        # Run the workflow
+        result = app.invoke(initial_state)
+        conversation_history.append({
+            "user_input": text_input,
+            "response": result["response"]
+        })
+        return result["response"]
+    except Exception as e:
+        return f"System error: {str(e)}"
+
+def clear_memory():
+    """Clear conversation history"""
+    global conversation_history
+    conversation_history = []
+    return "Memory cleared!"
+
+def save_conversation(filename: str = "conversation.json"):
+    """Save conversation to file"""
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(conversation_history, f, indent=2, ensure_ascii=False)
+        return f"Conversation saved to {filename}"
+    except Exception as e:
+        return f"Error saving: {str(e)}"
+
+def load_conversation(filename: str = "conversation.json"):
+    """Load conversation from file"""
+    global conversation_history
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            conversation_history = json.load(f)
+        return f"Conversation loaded from {filename}"
+    except Exception as e:
+        return f"Error loading: {str(e)}"
+
+def show_history():
+    """Show conversation history summary"""
+    return f"Conversation has {len(conversation_history)} messages"
+
+# EXAMPLE USAGE
+if __name__ == "__main__":
+    print("🤖 Multi-Agent Chatbot System Initialized!")
+    print("=" * 60)
+    print('\nGive Text Input or Image or both but while giving image input mention image:"Your Image"\nYou:')
+    print("🧠 Available Agents:")
+    print("   📝 TEXT AGENT    - General conversations & image analysis")
+    print("   💻 CODER AGENT   - Programming & code generation") 
+    print("   🔍 SEARCH AGENT  - Information retrieval & research")
+    print("   🔍 IMAGE AGENT  - Analysis the image ")
+    print("Commands: 'clear', 'save', 'load', 'history', 'quit'")
+    print("-" * 60)
+    
+    while True:
+        user_input = input("\n You: ").strip()
         
-                    }
-                })
-                except Exception as e:
-                     return f'Error processing image: {str(e)}'
-            # Adding user messages to memory 
-            self.add_to_memory('user', content)
+        if user_input.lower() == 'quit':
+            print(" Goodbye!")
+            break
+        elif user_input.lower() == 'clear':
+            print(clear_memory())
+            continue
+        elif user_input.lower() == 'save':
+            print(save_conversation())
+            continue
+        elif user_input.lower() == 'load':
+            print(load_conversation())
+            continue
+        elif user_input.lower() == 'history':
+            print(show_history())
+            continue
+        
+        # Handle image input
+        image_path = None
+        if 'image:' in user_input.lower():
+            parts = user_input.split('"')[1]
+            print(parts)
+            response = run_agent(text_input=user_input, image_src=parts)
+            print(f"\n Assistant: {response}")
+            # conversation_history.append()
             
-            response= client.chat.completions.create(
-                model = "gpt-4.1",
-                messages=[
-                    {"role": "user", "content": content}
-                ],
-                max_tokens=300
-            )
-            assistant_response = response.choices[0].message.content
-            self.add_to_memory('assitant', assistant_response)
+        
+        # Get response
+        else:
+            print(" Processing...")
+            response = run_agent(text_input=user_input, image_src=image_path)
+            print(f"\n Assistant: {response}")
             
-            return assistant_response
-        
-        def add_to_memory(self, role:str, content):
-             ''''
-             add message to conversation memory
-
-             Args:
-                role(str): 'user' or 'assistant'
-                content: Generated messages or user input (query)
-             '''
-             self.conversation_history = []
-             self.max_history = 50
-             messages = {'role': role, 'content': content}
-             self.conversation_history.append(messages)
-             
-             if len(self.conversation_history)> self.max_history:
-                  if self.conversation_history[0].get('role') == 'system':
-                       self.conversation_history = [self.conversation_history[0] ] + self.conversation_history[-(self.max_history-1):]
-                  else:
-                       self.conversation_history = self.conversation_history[-self.max_history:]
-        def set_system_message(self, system_messages:str):
-             """
-        Set or update the system message
-        
-        Args:
-            system_message (str): System prompt to guide the assistant's behavior
-        """
-             if self.conversation_history and self.conversation_history[0].get("role") == "system":
-                  self.conversation_history.pop(0)
-        
-        # Add new system message at the beginning
-             self.conversation_history.insert(0, {"role": "system", "content": system_messages})
-
-        def get_conversation_history(self):
-             '''
-             Get the current conversation history
-
-             Returns: 
-                 list: List of conversation messages
-             '''
-             return self.conversation_history
-        def clear_history(self):
-             '''
-             Clearing the conversation history 
-             '''
-             system_msg = None
-             if self.conversation_history and self.conversation_history[0].get('role') == 'system':
-                  system_msg = self.conversation_history[0]
-             self.conversation_history = []
-
-             if system_msg:
-                  self.conversation_history.append(system_msg)
-
-        def save_conversation(self, filename: str):
-             ''' 
-             Function which saves the conversation history
-             
-             Args:
-                  filename (str): Path to save the conversation
-            '''
-             import json, datetime
-             chat_name = datetime.datetime.now().strftime("%d-%m-%Y_%H-%M-%S")
-             with open(chat_name, 'w', encoding='utf-8') as f:
-                  json.dump(self.conversation_history, f, indent=2)
-                  print(f'Conversation History saved to file: {chat_name}')             
-                  
-    
-if __name__ == '__main__':
-     agent = Multiagent()
-while True:
-    user_input = input('\nGive Text Input or Image or both but while giving image input mention image:"Your Image"\nYou:').strip()
-    image_path = None
-    if 'image' in user_input.lower():
-        parts = user_input.split('"')[1]
-        print(parts)
-        # if len(parts) > 1:
-        #         image_path = parts[1].strip()
-        # user_input = input("Enter your question about the image: ").strip()
-        
-        # Get response from chatbot
-        response = agent.run_agent(image_src=parts, text_input=user_input)
-        print(f"\nAssistant: {response}")
-    
-    else:
-         response = agent.run_agent(image_src=image_path, text_input=user_input)
-         print(f"\nAssistant: {response}")
-        # Show memory usage
-        # print(f"[Memory: {len(conversation_history)} messages]")
-
-    if user_input.lower() in ['quit', 'exit', 'bye']:
-        print("Goodbye")
-        break
-    elif user_input.lower()  == 'clear':
-        agent.clear_history()
-        print('History cleared')
-        continue
-    elif user_input.lower().startswith('save '):
-        filename = user_input[5:].strip()
-        agent.save_conversation()
-        continue
-    elif user_input.lower().startswith('load '):
-        filename = user_input[5:].strip()
-        agent.get_conversation_history()
-        continue
-     
-    
+            # Show status
+            print(f"[Messages in memory: {len(conversation_history)}]")
